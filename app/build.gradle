@@ -3,6 +3,9 @@ plugins {
     id 'kotlin-android'
 }
 
+def ksEnv = System.getenv("KEYSTORE_PATH")
+def hasReleaseKey = ksEnv != null && file(ksEnv).length() > 0 && System.getenv("KEY_ALIAS")
+
 android {
     namespace "com.perchance.shell"
     compileSdk 34
@@ -18,7 +21,7 @@ android {
     signingConfigs {
         release {
             def ksPath = System.getenv("KEYSTORE_PATH")
-            if (ksPath != null) {
+            if (hasReleaseKey) {
                 storeFile file(ksPath)
                 storePassword System.getenv("KEYSTORE_PASS")
                 keyAlias System.getenv("KEY_ALIAS")
@@ -33,7 +36,7 @@ android {
             minifyEnabled false
         }
         release {
-            signingConfig signingConfigs.release
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
             minifyEnabled false
         }
     }
