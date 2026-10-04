@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Perchance Shell</string>
+    <string name="download_all">Download All</string>
+    <string name="private_library">Private library</string>
+    <string name="cancel">Cancel</string>
+    <string name="save_images">Save images</string>
+    <string name="images_saved">Images saved</string>
+    <string name="open_library">Open private library</string>
+    <string name="done">Done</string>
+    <string name="delete">Delete</string>
+    <string name="delete_confirm">Delete this image?</string>
+    <string name="delete_message">It will be removed from this app. This can’t be undone.</string>
+    <string name="retry">Retry</string>
+    <string name="network_error">Unable to load Perchance</string>
+    <string name="network_error_msg">Check your connection and try again.</string>
+    <string name="empty_library">No saved images yet</string>
+    <string name="empty_library_msg">Images downloaded from this app will appear here.</string>
+    <string name="downloading">Downloading images</string>
+    <string name="scanning">Scanning for images…</string>
+    <string name="images_found">%d images found</string>
+    <string name="private_note">They will be saved privately inside this app.</string>
+    <string name="saved_privately">Saved privately inside this app only</string>
+    <string name="cancel_download">Cancel download?</string>
+    <string name="hint_gesture">Swipe up with three fingers to save images</string>
+</resources>

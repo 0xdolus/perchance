@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PerchanceShell" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">#7C6CFF</item>
+        <item name="colorPrimaryDark">#5A4BCC</item>
+        <item name="colorAccent">#7C6CFF</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">#0E0E12</item>
+    </style>
+
+    <style name="Theme.PerchanceShell.Fullscreen" parent="Theme.PerchanceShell">
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>
