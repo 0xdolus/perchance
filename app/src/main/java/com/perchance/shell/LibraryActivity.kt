@@ -2,11 +2,13 @@ package com.perchance.shell
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +21,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -35,11 +38,15 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
-/** Private gallery: date-grouped grid, multi-select delete, swipeable zoomable detail. No share/export. */
+/**
+ * Private library. Level 1: folders (one per Download All). Level 2: image grid with multi-select.
+ * Level 3: full-bleed viewer (tap toggles chrome, filmstrip, swipe, pinch/double-tap zoom).
+ * No share, export or "open with".
+ */
 class LibraryActivity : AppCompatActivity() {
 
     private sealed class Item {
-        class Header(val label: String) : Item()
+        class FolderItem(val folder: ImageStore.Folder) : Item()
         class Row(val files: List<File>) : Item()
     }
 
@@ -50,15 +57,23 @@ class LibraryActivity : AppCompatActivity() {
     private lateinit var title: TextView
     private lateinit var count: TextView
     private lateinit var trash: TextView
-    private lateinit var detail: FrameLayout
+    private lateinit var viewer: FrameLayout
     private lateinit var zoom: ZoomImageView
     private lateinit var pos: TextView
+    private lateinit var info: TextView
+    private lateinit var topBar: View
+    private lateinit var bottomBar: View
+    private lateinit var stripScroll: HorizontalScrollView
+    private lateinit var strip: LinearLayout
 
+    private var folders: List<ImageStore.Folder> = emptyList()
+    private var openKey: String? = null
     private var files: List<File> = emptyList()
     private var items: List<Item> = emptyList()
     private val selected = LinkedHashSet<String>()
-    private var detailIndex = -1
-    private var loadToken = 0
+    private var index = -1
+    private var token = 0
+    private var chrome = true
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(2)
     private val cache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 8 / 1024).toInt()) {
@@ -73,9 +88,9 @@ class LibraryActivity : AppCompatActivity() {
         val root = FrameLayout(this).apply { setBackgroundColor(color(R.color.page_bg)) }
         val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        back = iconButton("\u2190") { if (selected.isNotEmpty()) clearSelection() else finish() }
+        back = iconButton("\u2190") { goBack() }
         title = TextView(this).apply {
-            textSize = 18f; typeface = Typeface.DEFAULT_BOLD; setTextColor(color(R.color.text))
+            textSize = 18f; typeface = Typeface.DEFAULT_BOLD; setTextColor(color(R.color.text)); maxLines = 1
         }
         count = TextView(this).apply { textSize = 13f; setTextColor(color(R.color.text_muted)) }
         trash = pillText("Delete", R.color.danger) { confirmDeleteSelected() }.apply { visibility = View.GONE }
@@ -91,7 +106,7 @@ class LibraryActivity : AppCompatActivity() {
         val body = FrameLayout(this)
         list = ListView(this).apply {
             divider = null; dividerHeight = 0
-            setPadding(dp(4), 0, dp(4), dp(8)); clipToPadding = false
+            setPadding(dp(8), 0, dp(8), dp(8)); clipToPadding = false
             selector = ColorDrawable(0)
             adapter = Adapter()
         }
@@ -113,65 +128,39 @@ class LibraryActivity : AppCompatActivity() {
         page.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(page, FrameLayout.LayoutParams(-1, -1))
 
-        zoom = ZoomImageView(this).apply {
-            onSwipe = { d ->
-                val n = detailIndex + d
-                if (n in files.indices) { detailIndex = n; showImage() }
-            }
-        }
-        pos = TextView(this).apply { textSize = 13f; setTextColor(color(R.color.text_muted)); gravity = Gravity.CENTER }
-        detail = FrameLayout(this).apply {
-            setBackgroundColor(color(R.color.page_bg)); visibility = View.GONE; isClickable = true
-            addView(zoom, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(64); bottomMargin = dp(16) })
-            addView(iconButton("\u2190") { closeDetail() },
-                FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.START).apply { setMargins(dp(8), dp(8), 0, 0) })
-            addView(pos, FrameLayout.LayoutParams(-2, dp(48), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(8) })
-            addView(pillText("Delete", R.color.danger) { confirmDeleteCurrent() },
-                FrameLayout.LayoutParams(-2, dp(44), Gravity.TOP or Gravity.END).apply { setMargins(0, dp(10), dp(12), 0) })
-        }
-        root.addView(detail, FrameLayout.LayoutParams(-1, -1))
+        buildViewer()
+        root.addView(viewer, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                when {
-                    detail.visibility == View.VISIBLE -> closeDetail()
-                    selected.isNotEmpty() -> clearSelection()
-                    else -> finish()
-                }
-            }
+            override fun handleOnBackPressed() = goBack()
         })
     }
 
     override fun onResume() { super.onResume(); refresh() }
 
+    private fun goBack() {
+        when {
+            viewer.visibility == View.VISIBLE -> closeViewer()
+            selected.isNotEmpty() -> clearSelection()
+            openKey != null -> { openKey = null; refresh() }
+            else -> finish()
+        }
+    }
+
     // ---------- data ----------
 
     private fun refresh() {
-        files = store.list()
+        folders = store.folders()
+        val open = folders.firstOrNull { it.key == openKey }
+        if (open == null) openKey = null
+        files = open?.files ?: emptyList()
+        items = if (open == null) folders.map { Item.FolderItem(it) } else files.chunked(3).map { Item.Row(it) }
         selected.retainAll(files.map { it.absolutePath }.toSet())
-        items = group(files)
-        empty.visibility = if (files.isEmpty()) View.VISIBLE else View.GONE
-        list.visibility = if (files.isEmpty()) View.GONE else View.VISIBLE
+        empty.visibility = if (folders.isEmpty()) View.VISIBLE else View.GONE
+        list.visibility = if (folders.isEmpty()) View.GONE else View.VISIBLE
         updateHeader()
         (list.adapter as BaseAdapter).notifyDataSetChanged()
-    }
-
-    private fun group(fs: List<File>): List<Item> {
-        val out = ArrayList<Item>()
-        var key = ""
-        var bucket = ArrayList<File>()
-        fun flush() {
-            bucket.chunked(3).forEach { out.add(Item.Row(it)) }
-            bucket = ArrayList()
-        }
-        for (f in fs) {
-            val k = dayLabel(f.lastModified())
-            if (k != key) { flush(); out.add(Item.Header(k)); key = k }
-            bucket.add(f)
-        }
-        flush()
-        return out
     }
 
     private fun dayKey(c: Calendar) = c.get(Calendar.YEAR) * 1000 + c.get(Calendar.DAY_OF_YEAR)
@@ -187,16 +176,26 @@ class LibraryActivity : AppCompatActivity() {
         }
     }
 
+    private fun folderTitle(f: ImageStore.Folder): String =
+        if (f.loose) "Earlier"
+        else dayLabel(f.time) + " \u00B7 " + SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(f.time))
+
+    private fun size(b: Long): String =
+        if (b < 1024 * 1024) "${maxOf(1L, b / 1024)} KB" else "%.1f MB".format(b / 1048576.0)
+
     // ---------- header / selection ----------
 
     private fun updateHeader() {
+        val open = folders.firstOrNull { it.key == openKey }
         if (selected.isNotEmpty()) {
             back.text = "\u2715"; title.text = "${selected.size} selected"
             count.visibility = View.GONE; trash.visibility = View.VISIBLE
         } else {
-            back.text = "\u2190"; title.text = "Private images"
-            count.text = if (files.isEmpty()) "" else "${files.size}"
-            count.visibility = View.VISIBLE; trash.visibility = View.GONE
+            back.text = "\u2190"
+            title.text = if (open == null) "Private images" else folderTitle(open)
+            count.text = if (open == null) "${folders.sumOf { it.files.size }}" else "${files.size}"
+            count.visibility = if (folders.isEmpty()) View.GONE else View.VISIBLE
+            trash.visibility = View.GONE
         }
     }
 
@@ -211,64 +210,153 @@ class LibraryActivity : AppCompatActivity() {
         (list.adapter as BaseAdapter).notifyDataSetChanged()
     }
 
+    private fun confirm(titleText: String, onYes: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(titleText)
+            .setMessage("This will remove it from this app. It can\u2019t be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> onYes() }
+            .show()
+    }
+
+    private fun deleteFiles(fs: List<File>) {
+        fs.forEach { store.delete(it); cache.remove(it.absolutePath) }
+    }
+
     private fun confirmDeleteSelected() {
         val n = selected.size
         if (n == 0) return
-        AlertDialog.Builder(this)
-            .setTitle("Delete $n image${if (n == 1) "" else "s"}?")
-            .setMessage("They will be removed from this app. This can\u2019t be undone.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
-                files.filter { selected.contains(it.absolutePath) }.forEach {
-                    store.delete(it); cache.remove(it.absolutePath)
-                }
-                selected.clear()
-                refresh()
-            }.show()
-    }
-
-    // ---------- detail ----------
-
-    private fun openDetail(index: Int) {
-        if (index !in files.indices) return
-        detailIndex = index
-        showImage()
-        detail.alpha = 0f; detail.scaleX = 0.97f; detail.scaleY = 0.97f
-        detail.visibility = View.VISIBLE
-        detail.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).start()
-    }
-
-    private fun showImage() {
-        val f = files[detailIndex]
-        pos.text = "${detailIndex + 1} / ${files.size}"
-        zoom.setImageBitmap(null)
-        val token = ++loadToken
-        val m = resources.displayMetrics
-        io.execute {
-            val bmp = decodeSampled(f, m.widthPixels, m.heightPixels)
-            main.post { if (token == loadToken) zoom.setImageBitmap(bmp) }
+        confirm("Delete $n image${if (n == 1) "" else "s"}?") {
+            deleteFiles(files.filter { selected.contains(it.absolutePath) })
+            selected.clear()
+            refresh()
         }
     }
 
-    private fun closeDetail() {
-        loadToken++
-        detail.visibility = View.GONE
+    private fun confirmDeleteFolder(f: ImageStore.Folder) {
+        confirm("Delete folder with ${f.files.size} image${if (f.files.size == 1) "" else "s"}?") {
+            deleteFiles(f.files)
+            refresh()
+        }
+    }
+
+    // ---------- viewer ----------
+
+    private fun buildViewer() {
+        zoom = ZoomImageView(this).apply {
+            onSwipe = { d ->
+                val n = index + d
+                if (n in files.indices) { index = n; showImage() }
+            }
+            onTap = { setChrome(!chrome) }
+        }
+        pos = TextView(this).apply { textSize = 13f; setTextColor(color(R.color.text)); gravity = Gravity.CENTER }
+        info = TextView(this).apply { textSize = 12f; setTextColor(color(R.color.text_muted)); maxLines = 2 }
+        strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), 0, dp(12), 0) }
+        stripScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(strip, FrameLayout.LayoutParams(-2, -1))
+        }
+
+        topBar = FrameLayout(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xCC000000.toInt(), 0))
+            addView(iconButton("\u2190") { closeViewer() },
+                FrameLayout.LayoutParams(dp(48), dp(48), Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
+            addView(pos, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        }
+        bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xE6000000.toInt(), 0))
+            setPadding(0, dp(24), 0, dp(12))
+            addView(stripScroll, LinearLayout.LayoutParams(-1, dp(60)))
+            addView(LinearLayout(context).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(10), dp(16), 0)
+                addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(pillText("Delete", R.color.danger) { confirmDeleteCurrent() }, LinearLayout.LayoutParams(-2, dp(44)))
+            })
+        }
+        viewer = FrameLayout(this).apply {
+            setBackgroundColor(0xFF000000.toInt()); visibility = View.GONE; isClickable = true
+            addView(zoom, FrameLayout.LayoutParams(-1, -1))
+            addView(topBar, FrameLayout.LayoutParams(-1, dp(72), Gravity.TOP))
+            addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        }
+    }
+
+    private fun setChrome(show: Boolean) {
+        chrome = show
+        listOf(topBar, bottomBar).forEach { v ->
+            if (show) { v.visibility = View.VISIBLE; v.animate().alpha(1f).setDuration(150).start() }
+            else v.animate().alpha(0f).setDuration(150).withEndAction { if (!chrome) v.visibility = View.GONE }.start()
+        }
+    }
+
+    private fun openViewer(i: Int) {
+        if (i !in files.indices) return
+        index = i
+        chrome = true
+        topBar.alpha = 1f; bottomBar.alpha = 1f; topBar.visibility = View.VISIBLE; bottomBar.visibility = View.VISIBLE
+        buildStrip()
+        showImage()
+        viewer.alpha = 0f
+        viewer.visibility = View.VISIBLE
+        viewer.animate().alpha(1f).setDuration(160).start()
+    }
+
+    private fun buildStrip() {
+        strip.removeAllViews()
+        files.forEachIndexed { i, f ->
+            val iv = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = rounded(color(R.color.surface), 8); clipToOutline = true
+                setOnClickListener { index = i; showImage() }
+            }
+            strip.addView(iv, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(6); gravity = Gravity.CENTER_VERTICAL })
+            loadThumb(iv, f)
+        }
+    }
+
+    private fun showImage() {
+        val f = files.getOrNull(index) ?: return
+        pos.text = "${index + 1} / ${files.size}"
+        for (i in 0 until strip.childCount) {
+            val v = strip.getChildAt(i)
+            val cur = i == index
+            v.alpha = if (cur) 1f else 0.45f
+            v.scaleX = if (cur) 1.1f else 1f; v.scaleY = v.scaleX
+        }
+        strip.getChildAt(index)?.let { c ->
+            stripScroll.post { stripScroll.smoothScrollTo(c.left - (stripScroll.width - c.width) / 2, 0) }
+        }
+        info.text = f.name
         zoom.setImageBitmap(null)
-        detailIndex = -1
+        val t = ++token
+        val m = resources.displayMetrics
+        io.execute {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.path, o)
+            val meta = f.name + "\n" + o.outWidth + " \u00D7 " + o.outHeight + "  \u00B7  " + size(f.length())
+            val bmp = decodeSampled(f, m.widthPixels, m.heightPixels)
+            main.post { if (t == token) { info.text = meta; zoom.setImageBitmap(bmp) } }
+        }
+    }
+
+    private fun closeViewer() {
+        token++
+        viewer.visibility = View.GONE
+        zoom.setImageBitmap(null)
+        index = -1
     }
 
     private fun confirmDeleteCurrent() {
-        val f = files.getOrNull(detailIndex) ?: return
-        AlertDialog.Builder(this)
-            .setTitle("Delete this image?")
-            .setMessage("It will be removed from this app. This can\u2019t be undone.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
-                store.delete(f); cache.remove(f.absolutePath)
-                refresh()
-                if (files.isEmpty()) closeDetail()
-                else { detailIndex = minOf(detailIndex, files.size - 1); showImage() }
-            }.show()
+        val f = files.getOrNull(index) ?: return
+        confirm("Delete this image?") {
+            deleteFiles(listOf(f))
+            refresh()
+            if (files.isEmpty()) closeViewer()
+            else { index = minOf(index, files.size - 1); buildStrip(); showImage() }
+        }
     }
 
     // ---------- views ----------
@@ -287,25 +375,71 @@ class LibraryActivity : AppCompatActivity() {
         setOnClickListener { onClick() }
     }
 
+    private fun loadThumb(iv: ImageView, f: File) {
+        val path = f.absolutePath
+        iv.tag = path
+        val hit = cache.get(path)
+        if (hit != null) { iv.setImageBitmap(hit); return }
+        iv.setImageBitmap(null)
+        io.execute {
+            val b = decodeSampled(f, 256, 256) ?: return@execute
+            cache.put(path, b)
+            main.post { if (iv.tag == path) iv.setImageBitmap(b) }
+        }
+    }
+
     private inner class Adapter : BaseAdapter() {
         override fun getCount() = items.size
         override fun getItem(p: Int) = items[p]
         override fun getItemId(p: Int) = p.toLong()
         override fun getViewTypeCount() = 2
-        override fun getItemViewType(p: Int) = if (items[p] is Item.Header) 0 else 1
+        override fun getItemViewType(p: Int) = if (items[p] is Item.FolderItem) 0 else 1
         override fun getView(p: Int, convert: View?, parent: ViewGroup): View {
             val item = items[p]
-            if (item is Item.Header) {
-                val tv = (convert as? TextView) ?: TextView(this@LibraryActivity).apply {
-                    textSize = 13f; setTextColor(color(R.color.text_muted))
-                    setPadding(dp(6), dp(16), dp(6), dp(8))
-                }
-                tv.text = item.label
-                return tv
+            if (item is Item.FolderItem) {
+                val v = (convert as? FolderView) ?: FolderView(this@LibraryActivity)
+                v.bind(item.folder)
+                return v
             }
             val row = (convert as? RowView) ?: RowView(this@LibraryActivity)
             row.bind((item as Item.Row).files)
             return row
+        }
+    }
+
+    private inner class FolderView(c: Context) : FrameLayout(c) {
+        private val cover = ImageView(c).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = rounded(color(R.color.border), 12); clipToOutline = true
+        }
+        private val name = TextView(c).apply {
+            textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setTextColor(color(R.color.text)); maxLines = 1
+        }
+        private val sub = TextView(c).apply { textSize = 13f; setTextColor(color(R.color.text_muted)) }
+        private val card = LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(12), dp(16), dp(12))
+            background = rounded(color(R.color.surface), 18)
+            addView(cover, LinearLayout.LayoutParams(dp(68), dp(68)))
+            addView(LinearLayout(c).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(14), 0, dp(8), 0)
+                addView(name); addView(sub)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(TextView(c).apply { text = "\u203A"; textSize = 26f; setTextColor(color(R.color.text_muted)) })
+        }
+
+        init {
+            setPadding(0, dp(4), 0, dp(4))
+            addView(card, FrameLayout.LayoutParams(-1, -2))
+        }
+
+        fun bind(f: ImageStore.Folder) {
+            name.text = folderTitle(f)
+            sub.text = "${f.files.size} image${if (f.files.size == 1) "" else "s"}"
+            loadThumb(cover, f.files.first())
+            card.setOnClickListener { openKey = f.key; refresh(); list.setSelection(0) }
+            card.setOnLongClickListener { confirmDeleteFolder(f); true }
         }
     }
 
@@ -337,29 +471,20 @@ class LibraryActivity : AppCompatActivity() {
 
         fun bind(f: File) {
             visibility = View.VISIBLE
-            val path = f.absolutePath
-            tag = path
-            val sel = selected.contains(path)
+            val sel = selected.contains(f.absolutePath)
             mark.visibility = if (sel) View.VISIBLE else View.GONE
             iv.alpha = if (sel) 0.55f else 1f
-            val hit = cache.get(path)
-            if (hit != null) iv.setImageBitmap(hit) else {
-                iv.setImageBitmap(null)
-                io.execute {
-                    val bmp = decodeSampled(f, 256, 256) ?: return@execute
-                    cache.put(path, bmp)
-                    main.post { if (tag == path) iv.setImageBitmap(bmp) }
-                }
-            }
-            setOnClickListener { if (selected.isNotEmpty()) toggle(f) else openDetail(files.indexOf(f)) }
+            loadThumb(iv, f)
+            setOnClickListener { if (selected.isNotEmpty()) toggle(f) else openViewer(files.indexOf(f)) }
             setOnLongClickListener { toggle(f); true }
         }
     }
 }
 
-/** Pinch to zoom, drag when zoomed, double-tap toggle, horizontal fling (when not zoomed) to change image. */
+/** Pinch to zoom, drag when zoomed, double-tap toggle, single tap callback, horizontal fling to change image. */
 class ZoomImageView(c: Context) : ImageView(c) {
     var onSwipe: ((Int) -> Unit)? = null
+    var onTap: (() -> Unit)? = null
     private val m = Matrix()
     private var rel = 1f
 
@@ -371,6 +496,7 @@ class ZoomImageView(c: Context) : ImageView(c) {
 
     private val gestures = GestureDetector(c, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean { onTap?.invoke(); return true }
         override fun onDoubleTap(e: MotionEvent): Boolean {
             if (rel > 1.01f) fit() else zoomBy(2.5f, e.x, e.y)
             return true

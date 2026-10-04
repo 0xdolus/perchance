@@ -56,6 +56,7 @@ class CaptureController(
         onState(State.Scanning)
         val s = session
         io.execute {
+            store.beginBatch()
             store.ensureIndexed()
             main.post {
                 if (s == session && isActive) {

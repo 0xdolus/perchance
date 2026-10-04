@@ -16,6 +16,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -77,7 +78,8 @@ class MainActivity : AppCompatActivity() {
         })
 
         window.decorView.post { hideBars() }
-        webView.loadUrl(START_URL)
+        // No session saving: every launch starts from a clean web profile.
+        wipeWebData { webView.loadUrl(START_URL) }
     }
 
     // ---------- UI ----------
@@ -275,6 +277,15 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- WebView ----------
 
+    /** Clears cookies, DOM storage/IndexedDB, cache, history and form data. Saved images are not touched. */
+    private fun wipeWebData(then: (() -> Unit)? = null) {
+        WebStorage.getInstance().deleteAllData()
+        webView.clearCache(true)
+        webView.clearHistory()
+        webView.clearFormData()
+        CookieManager.getInstance().removeAllCookies { then?.invoke() }
+    }
+
     private fun setupWebView() {
         webView.setBackgroundColor(color(R.color.page_bg))
         webView.settings.apply {
@@ -392,6 +403,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() { super.onPause(); webView.onPause(); CookieManager.getInstance().flush() }
 
     override fun onDestroy() {
+        if (isFinishing) wipeWebData()
         ui.removeCallbacksAndMessages(null)
         capture.cancel()
         super.onDestroy()

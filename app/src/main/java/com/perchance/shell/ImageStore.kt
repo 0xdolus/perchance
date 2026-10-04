@@ -12,17 +12,24 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Private storage: context.filesDir/generated_images/. No MediaStore, no public dirs.
+ * Private storage: context.filesDir/generated_images/<batch>/image_*.ext
+ * Each "Download All" creates one batch folder. Files from older versions sit loose in the root.
  * Writes go to .tmp/ first, then are renamed into place, so a final file is never half-written.
  */
 class ImageStore(context: Context) {
 
     enum class Result { SAVED, DUPLICATE, INVALID, NO_SPACE, IO }
 
+    class Folder(val dir: File, val files: List<File>, val loose: Boolean) {
+        val key: String get() = dir.absolutePath + if (loose) "#loose" else ""
+        val time: Long get() = files.maxOfOrNull { it.lastModified() } ?: 0L
+    }
+
     val dir = File(context.filesDir, "generated_images").apply { mkdirs() }
     private val tmpDir = File(dir, ".tmp").apply { mkdirs() }
-    private val hashes = HashMap<String, String>() // sha256 -> file name
+    private val hashes = HashMap<String, String>() // sha256 -> absolute path
     private var indexed = false
+    private var batch: String? = null
 
     @Volatile var lastSaved: File? = null
 
@@ -32,24 +39,46 @@ class ImageStore(context: Context) {
     }
 
     @Synchronized
+    fun beginBatch() {
+        batch = stamp()
+    }
+
+    @Synchronized
     fun ensureIndexed() {
         if (indexed) return
         hashes.clear()
         list().forEach { f ->
-            try { hashes[sha256(f.readBytes())] = f.name } catch (_: Exception) {}
+            try { hashes[sha256(f.readBytes())] = f.absolutePath } catch (_: Exception) {}
         }
         indexed = true
     }
 
+    private fun isImage(f: File) = f.isFile && f.name.startsWith("image_")
+
     @Synchronized
-    fun list(): List<File> =
-        (dir.listFiles { f -> f.isFile && f.name.startsWith("image_") } ?: emptyArray())
-            .sortedWith(compareByDescending<File> { it.lastModified() }.thenByDescending { it.name })
+    fun folders(): List<Folder> {
+        val out = ArrayList<Folder>()
+        val loose = (dir.listFiles() ?: emptyArray()).filter { isImage(it) }.sortedByDescending { it.lastModified() }
+        if (loose.isNotEmpty()) out.add(Folder(dir, loose, true))
+        (dir.listFiles() ?: emptyArray()).filter { it.isDirectory && it.name != ".tmp" }.forEach { d ->
+            val fs = (d.listFiles() ?: emptyArray()).filter { isImage(it) }.sortedBy { it.name }
+            if (fs.isNotEmpty()) out.add(Folder(d, fs, false))
+        }
+        return out.sortedByDescending { it.time }
+    }
+
+    @Synchronized
+    fun list(): List<File> = folders().flatMap { it.files }
 
     @Synchronized
     fun delete(file: File): Boolean {
-        val ok = file.parentFile == dir && file.delete()
-        if (ok) hashes.values.remove(file.name)
+        val inside = file.absolutePath.startsWith(dir.absolutePath + File.separator)
+        val ok = inside && file.delete()
+        if (ok) {
+            hashes.values.remove(file.absolutePath)
+            val p = file.parentFile
+            if (p != null && p != dir && p != tmpDir && p.list()?.isEmpty() == true) p.delete()
+        }
         return ok
     }
 
@@ -68,9 +97,11 @@ class ImageStore(context: Context) {
         val tmp = File(tmpDir, UUID.randomUUID().toString() + ".part")
         return try {
             FileOutputStream(tmp).use { it.write(bytes); it.fd.sync() }
-            val dest = nextFile(ext)
+            val b = batch ?: stamp().also { batch = it }
+            val target = File(dir, b).apply { mkdirs() }
+            val dest = nextFile(target, ext)
             if (!tmp.renameTo(dest)) { tmp.delete(); return Result.IO }
-            hashes[sha] = dest.name
+            hashes[sha] = dest.absolutePath
             lastSaved = dest
             Result.SAVED
         } catch (e: IOException) {
@@ -79,11 +110,13 @@ class ImageStore(context: Context) {
         }
     }
 
-    private fun nextFile(ext: String): File {
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    private fun stamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+    private fun nextFile(target: File, ext: String): File {
+        val s = stamp()
         var n = 1
         while (true) {
-            val f = File(dir, "image_${stamp}_%03d.$ext".format(n))
+            val f = File(target, "image_${s}_%03d.$ext".format(n))
             if (!f.exists()) return f
             n++
         }
