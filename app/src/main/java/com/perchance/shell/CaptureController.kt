@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.Executors
 
 /**
@@ -20,7 +21,8 @@ class CaptureController(
         data class Running(val done: Int, val total: Int, val failed: Int) : State()
         data class Finished(
             val saved: Int, val duplicates: Int, val failed: Int,
-            val total: Int, val lowSpace: Boolean
+            val total: Int, val lowSpace: Boolean,
+            val files: List<File> = emptyList()
         ) : State()
     }
 
@@ -36,6 +38,7 @@ class CaptureController(
     private var failed = 0
     private var pending = 0
     private var lowSpace = false
+    private val savedFiles = ArrayList<File>()
 
     private val settle = Runnable { if (pending > 0) bump(600) else finish() }
 
@@ -49,6 +52,7 @@ class CaptureController(
         session++
         isActive = true
         total = 0; saved = 0; dup = 0; failed = 0; pending = 0; lowSpace = false
+        savedFiles.clear()
         onState(State.Scanning)
         val s = session
         io.execute {
@@ -100,11 +104,12 @@ class CaptureController(
             } catch (_: Exception) {
                 ImageStore.Result.INVALID
             }
+            val file = if (r == ImageStore.Result.SAVED) store.lastSaved else null
             main.post {
                 if (s != session) return@post
                 pending--
                 when (r) {
-                    ImageStore.Result.SAVED -> saved++
+                    ImageStore.Result.SAVED -> { saved++; file?.let { savedFiles.add(it) } }
                     ImageStore.Result.DUPLICATE -> dup++
                     else -> {
                         failed++
@@ -123,7 +128,7 @@ class CaptureController(
 
     private fun finish() {
         isActive = false
-        onState(State.Finished(saved, dup, failed, total, lowSpace))
+        onState(State.Finished(saved, dup, failed, total, lowSpace, savedFiles.takeLast(4).reversed()))
     }
 
     companion object {

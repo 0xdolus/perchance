@@ -19,6 +19,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var handleZone: FrameLayout
     private lateinit var sheet: LinearLayout
     private lateinit var offline: LinearLayout
+    private lateinit var progressLine: View
     private lateinit var store: ImageStore
     private lateinit var capture: CaptureController
 
@@ -74,6 +76,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        window.decorView.post { hideBars() }
         webView.loadUrl(START_URL)
     }
 
@@ -82,18 +85,26 @@ class MainActivity : AppCompatActivity() {
     private fun color(id: Int) = ContextCompat.getColor(this, id)
 
     private fun buildUi() {
-        val root = FrameLayout(this).apply { setBackgroundColor(color(R.color.bg)) }
+        val root = FrameLayout(this).apply { setBackgroundColor(color(R.color.page_bg)) }
         webView = WebView(this)
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
 
         // Tiny handle at the bottom edge. The only visible native element.
+        // Slim tab on the right edge, a little below centre: nothing on Perchance lives there.
         handleZone = FrameLayout(this).apply {
             setOnClickListener { showBar() }
             addView(View(context).apply {
-                background = rounded(0x66FFFFFF, 2)
-            }, FrameLayout.LayoutParams(dp(40), dp(4), Gravity.CENTER))
+                background = rounded(0x55FFFFFF, 2)
+            }, FrameLayout.LayoutParams(dp(4), dp(44), Gravity.CENTER_VERTICAL or Gravity.END).apply { rightMargin = dp(4) })
         }
-        root.addView(handleZone, FrameLayout.LayoutParams(dp(120), dp(28), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        root.addView(handleZone, FrameLayout.LayoutParams(dp(28), dp(96), Gravity.END or Gravity.CENTER_VERTICAL))
+        root.post { handleZone.translationY = root.height * 0.05f }
+
+        progressLine = View(this).apply {
+            setBackgroundColor(color(R.color.accent))
+            pivotX = 0f; scaleX = 0f; visibility = View.GONE
+        }
+        root.addView(progressLine, FrameLayout.LayoutParams(-1, dp(2), Gravity.TOP))
 
         sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -111,7 +122,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(32), 0, dp(32), 0)
-            setBackgroundColor(color(R.color.bg))
+            setBackgroundColor(color(R.color.page_bg))
             visibility = View.GONE
             isClickable = true
             addView(label("Unable to load Perchance", 20f, R.color.text, true))
@@ -171,9 +182,10 @@ class MainActivity : AppCompatActivity() {
         resetSheet()
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row.addView(pill("Download All", true) { startDownloadAll() }, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(pill("\u25A6", false) { openLibrary() }, LinearLayout.LayoutParams(dp(56), -2).apply {
-            leftMargin = dp(10)
-        })
+        val n = store.list().size
+        row.addView(pill(if (n > 0) "\u25A6 $n" else "\u25A6", false) { openLibrary() }.apply {
+            minWidth = dp(56); setPadding(dp(16), 0, dp(16), 0)
+        }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
         sheet.addView(row)
         reveal(5000)
     }
@@ -207,6 +219,7 @@ class MainActivity : AppCompatActivity() {
                 sheet.addView(label(msg, 17f, R.color.ok, true))
                 if (f.duplicates > 0 && f.saved > 0)
                     sheet.addView(label("${f.duplicates} already saved", 13f, R.color.text_muted, false))
+                if (f.files.isNotEmpty()) sheet.addView(thumbRow(f.files), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
                 sheet.addView(pill("Open library", true) { openLibrary() }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
             }
             else -> {
@@ -220,6 +233,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
         reveal(if (ok) 6000 else 0)
+    }
+
+    private fun thumbRow(files: List<java.io.File>) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        files.forEach { f ->
+            val iv = ImageView(context).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = rounded(color(R.color.border), 10); clipToOutline = true
+            }
+            addView(iv, LinearLayout.LayoutParams(dp(56), dp(56)).apply { rightMargin = dp(6) })
+            Thread {
+                val b = decodeSampled(f, 128, 128)
+                runOnUiThread { iv.setImageBitmap(b) }
+            }.start()
+        }
     }
 
     private fun render(s: CaptureController.State) {
@@ -248,7 +276,7 @@ class MainActivity : AppCompatActivity() {
     // ---------- WebView ----------
 
     private fun setupWebView() {
-        webView.setBackgroundColor(color(R.color.bg))
+        webView.setBackgroundColor(color(R.color.page_bg))
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -266,7 +294,20 @@ class MainActivity : AppCompatActivity() {
         webView.setDownloadListener { _, _, _, _, _ ->
             Toast.makeText(this, "Use the handle at the bottom \u2192 Download All", Toast.LENGTH_SHORT).show()
         }
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress < 100) {
+                    progressLine.animate().cancel()
+                    progressLine.visibility = View.VISIBLE
+                    progressLine.alpha = 1f
+                    progressLine.scaleX = newProgress / 100f
+                } else {
+                    progressLine.animate().alpha(0f).setDuration(200).withEndAction {
+                        progressLine.visibility = View.GONE
+                    }.start()
+                }
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (!request.isForMainFrame) return false
@@ -319,25 +360,35 @@ class MainActivity : AppCompatActivity() {
         bridgeReady = true
     }
 
+    /** Main-frame navigation is locked to the generator page. Iframes and sub-resources are not restricted. */
     private fun isAllowedUrl(url: String?): Boolean {
         val u = try { Uri.parse(url ?: return false) } catch (_: Exception) { return false }
         val host = u.host ?: return false
-        return u.scheme == "https" && (host == "perchance.org" || host.endsWith(".perchance.org"))
+        val path = u.path ?: ""
+        return u.scheme == "https" && (host == "perchance.org" || host == "www.perchance.org") &&
+            (path == GENERATOR_PATH || path.startsWith("$GENERATOR_PATH/"))
     }
 
     // ---------- lifecycle ----------
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            WindowCompat.getInsetsController(window, window.decorView).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.systemBars())
-            }
+        if (hasFocus) hideBars()
+    }
+
+    private fun hideBars() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
         }
     }
 
-    override fun onResume() { super.onResume(); webView.onResume() }
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
+        hideBars()
+        ui.postDelayed({ hideBars() }, 400) // some launchers restore the bars right after the splash handoff
+    }
     override fun onPause() { super.onPause(); webView.onPause(); CookieManager.getInstance().flush() }
 
     override fun onDestroy() {
@@ -347,6 +398,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        const val START_URL = "https://perchance.org/ai-text-to-image-generator"
+        const val GENERATOR_PATH = "/ai-text-to-image-generator"
+        const val START_URL = "https://perchance.org$GENERATOR_PATH"
     }
 }

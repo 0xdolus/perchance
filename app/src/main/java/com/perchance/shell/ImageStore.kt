@@ -24,6 +24,8 @@ class ImageStore(context: Context) {
     private val hashes = HashMap<String, String>() // sha256 -> file name
     private var indexed = false
 
+    @Volatile var lastSaved: File? = null
+
     @Synchronized
     fun cleanTmp() {
         tmpDir.listFiles()?.forEach { it.delete() }
@@ -69,6 +71,7 @@ class ImageStore(context: Context) {
             val dest = nextFile(ext)
             if (!tmp.renameTo(dest)) { tmp.delete(); return Result.IO }
             hashes[sha] = dest.name
+            lastSaved = dest
             Result.SAVED
         } catch (e: IOException) {
             tmp.delete()
