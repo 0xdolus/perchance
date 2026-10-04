@@ -1,0 +1,352 @@
+package com.perchance.shell
+
+import android.content.Intent
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var webView: WebView
+    private lateinit var handleZone: FrameLayout
+    private lateinit var sheet: LinearLayout
+    private lateinit var offline: LinearLayout
+    private lateinit var store: ImageStore
+    private lateinit var capture: CaptureController
+
+    private val ui = Handler(Looper.getMainLooper())
+    private val autoHide = Runnable { hideSheet() }
+    private var loadFailed = false
+    private var bridgeReady = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        store = ImageStore(this)
+        Thread { store.cleanTmp() }.start()
+        capture = CaptureController(store, ::render)
+
+        buildUi()
+        setupWebView()
+        setupBridge()
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    capture.isActive -> { capture.cancel(); hideSheet() } // in-flight write finishes atomically
+                    sheet.visibility == View.VISIBLE -> hideSheet()
+                    offline.visibility == View.VISIBLE -> finish()
+                    webView.canGoBack() && isAllowedUrl(webView.url) -> webView.goBack()
+                    else -> finish()
+                }
+            }
+        })
+
+        webView.loadUrl(START_URL)
+    }
+
+    // ---------- UI ----------
+
+    private fun color(id: Int) = ContextCompat.getColor(this, id)
+
+    private fun buildUi() {
+        val root = FrameLayout(this).apply { setBackgroundColor(color(R.color.bg)) }
+        webView = WebView(this)
+        root.addView(webView, FrameLayout.LayoutParams(-1, -1))
+
+        // Tiny handle at the bottom edge. The only visible native element.
+        handleZone = FrameLayout(this).apply {
+            setOnClickListener { showBar() }
+            addView(View(context).apply {
+                background = rounded(0x66FFFFFF, 2)
+            }, FrameLayout.LayoutParams(dp(40), dp(4), Gravity.CENTER))
+        }
+        root.addView(handleZone, FrameLayout.LayoutParams(dp(120), dp(28), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+
+        sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(18), dp(16), dp(16))
+            background = rounded(0xF2171717.toInt(), 26)
+            elevation = dp(12).toFloat()
+            visibility = View.GONE
+            isClickable = true
+        }
+        root.addView(sheet, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            setMargins(dp(8), 0, dp(8), dp(8))
+        })
+
+        offline = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(32), 0, dp(32), 0)
+            setBackgroundColor(color(R.color.bg))
+            visibility = View.GONE
+            isClickable = true
+            addView(label("Unable to load Perchance", 20f, R.color.text, true))
+            addView(label("Check your connection and try again.", 14f, R.color.text_muted, false).apply {
+                setPadding(0, dp(8), 0, dp(24))
+            })
+            addView(pill("Retry", true) {
+                loadFailed = false
+                offline.visibility = View.GONE
+                webView.loadUrl(START_URL)
+            }, LinearLayout.LayoutParams(dp(200), -2))
+        }
+        root.addView(offline, FrameLayout.LayoutParams(-1, -1))
+        setContentView(root)
+    }
+
+    private fun label(t: String, sp: Float, c: Int, bold: Boolean) = TextView(this).apply {
+        text = t; textSize = sp; setTextColor(color(c)); gravity = Gravity.CENTER
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun pill(t: String, primary: Boolean, onClick: () -> Unit) = TextView(this).apply {
+        text = t; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        setTextColor(color(if (primary) R.color.bg else R.color.text))
+        background = rounded(color(if (primary) R.color.accent else R.color.border), 16)
+        minHeight = dp(56)
+        setOnClickListener { onClick() }
+    }
+
+    private fun resetSheet() {
+        ui.removeCallbacks(autoHide)
+        sheet.removeAllViews()
+    }
+
+    private fun reveal(autoHideMs: Long = 0) {
+        handleZone.visibility = View.INVISIBLE
+        if (sheet.visibility != View.VISIBLE) {
+            sheet.visibility = View.VISIBLE
+            sheet.alpha = 0f
+            sheet.translationY = dp(60).toFloat()
+            sheet.animate().alpha(1f).translationY(0f).setDuration(220).start()
+        }
+        if (autoHideMs > 0) ui.postDelayed(autoHide, autoHideMs)
+    }
+
+    private fun hideSheet() {
+        ui.removeCallbacks(autoHide)
+        if (sheet.visibility != View.VISIBLE) return
+        sheet.animate().alpha(0f).translationY(dp(60).toFloat()).setDuration(180).withEndAction {
+            sheet.visibility = View.GONE
+            handleZone.visibility = View.VISIBLE
+        }.start()
+    }
+
+    private fun showBar() {
+        if (capture.isActive) return
+        resetSheet()
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(pill("Download All", true) { startDownloadAll() }, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(pill("\u25A6", false) { openLibrary() }, LinearLayout.LayoutParams(dp(56), -2).apply {
+            leftMargin = dp(10)
+        })
+        sheet.addView(row)
+        reveal(5000)
+    }
+
+    private fun showProgress(done: Int, total: Int, failed: Int, scanning: Boolean) {
+        resetSheet()
+        sheet.addView(label(if (scanning) "Looking for images" else "Downloading images", 17f, R.color.text, true).apply { gravity = Gravity.START })
+        sheet.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = scanning
+            max = maxOf(total, 1); progress = done
+            progressTintList = android.content.res.ColorStateList.valueOf(color(R.color.accent))
+        }, LinearLayout.LayoutParams(-1, dp(8)).apply { topMargin = dp(14); bottomMargin = dp(8) })
+        if (!scanning) {
+            val extra = if (failed > 0) "  \u00B7  $failed failed" else ""
+            sheet.addView(label("$done of $total$extra", 13f, R.color.text_muted, false).apply { gravity = Gravity.START })
+        }
+        reveal()
+    }
+
+    private fun showFinished(f: CaptureController.State.Finished) {
+        resetSheet()
+        val ok = f.failed == 0 && f.saved + f.duplicates > 0
+        when {
+            f.total == 0 && f.saved + f.duplicates + f.failed == 0 -> {
+                sheet.addView(label("No generated images found", 17f, R.color.text, true))
+                sheet.addView(label("Generate an image first, then try again.", 13f, R.color.text_muted, false).apply { setPadding(0, dp(6), 0, dp(14)) })
+                sheet.addView(pill("OK", false) { hideSheet() })
+            }
+            ok -> {
+                val msg = if (f.saved > 0) "\u2713 ${f.saved} image${if (f.saved == 1) "" else "s"} saved privately" else "\u2713 Already saved"
+                sheet.addView(label(msg, 17f, R.color.ok, true))
+                if (f.duplicates > 0 && f.saved > 0)
+                    sheet.addView(label("${f.duplicates} already saved", 13f, R.color.text_muted, false))
+                sheet.addView(pill("Open library", true) { openLibrary() }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+            }
+            else -> {
+                sheet.addView(label("${f.failed} image${if (f.failed == 1) "" else "s"} couldn\u2019t be saved", 17f, R.color.danger, true))
+                sheet.addView(label(
+                    (if (f.lowSpace) "Not enough storage. " else "") + "${f.saved + f.duplicates} saved.",
+                    13f, R.color.text_muted, false).apply { setPadding(0, dp(6), 0, dp(14)) })
+                sheet.addView(pill("Retry", true) { startDownloadAll() })
+                if (f.saved + f.duplicates > 0)
+                    sheet.addView(pill("Open library", false) { openLibrary() }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            }
+        }
+        reveal(if (ok) 6000 else 0)
+    }
+
+    private fun render(s: CaptureController.State) {
+        when (s) {
+            is CaptureController.State.Scanning -> showProgress(0, 0, 0, true)
+            is CaptureController.State.Running -> showProgress(s.done, s.total, s.failed, false)
+            is CaptureController.State.Finished -> showFinished(s)
+        }
+    }
+
+    private fun openLibrary() {
+        hideSheet()
+        startActivity(Intent(this, LibraryActivity::class.java))
+    }
+
+    private fun startDownloadAll() {
+        if (!bridgeReady) {
+            Toast.makeText(this, "Please update Android System WebView", Toast.LENGTH_LONG).show()
+            return
+        }
+        capture.start {
+            webView.evaluateJavascript("window.__pcsFlush && window.__pcsFlush()", null)
+        }
+    }
+
+    // ---------- WebView ----------
+
+    private fun setupWebView() {
+        webView.setBackgroundColor(color(R.color.bg))
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = false
+            allowContentAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = false
+        }
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(webView, true)
+        }
+        // The page's own download links would write to public storage. Not wanted.
+        webView.setDownloadListener { _, _, _, _, _ ->
+            Toast.makeText(this, "Use the handle at the bottom \u2192 Download All", Toast.LENGTH_SHORT).show()
+        }
+        webView.webChromeClient = WebChromeClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (!request.isForMainFrame) return false
+                return !isAllowedUrl(request.url.toString())
+            }
+
+            @Suppress("OVERRIDE_DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean = !isAllowedUrl(url)
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                loadFailed = false
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (!loadFailed) offline.visibility = View.GONE
+                CookieManager.getInstance().flush()
+            }
+
+            @Suppress("OVERRIDE_DEPRECATION")
+            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                if (errorCode == ERROR_UNKNOWN) return
+                loadFailed = true
+                offline.visibility = View.VISIBLE
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                loadFailed = true
+                offline.visibility = View.VISIBLE
+                (webView.parent as? ViewGroup)?.removeView(webView)
+                webView.destroy()
+                recreate()
+                return true
+            }
+        }
+    }
+
+    /**
+     * Narrow bridge: one JS object ("shell"), one method (postMessage(string)), injected only into
+     * frames on perchance.org origins. Native only parses {t,id,mime,b64}; no paths or URLs from the page.
+     */
+    private fun setupBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
+            !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        val rules = setOf("https://perchance.org", "https://*.perchance.org")
+        WebViewCompat.addWebMessageListener(webView, "shell", rules) { _, message, _, _, _ ->
+            message.data?.let { capture.onMessage(it) }
+        }
+        val script = assets.open("capture.js").bufferedReader().use { it.readText() }
+        WebViewCompat.addDocumentStartJavaScript(webView, script, rules)
+        bridgeReady = true
+    }
+
+    private fun isAllowedUrl(url: String?): Boolean {
+        val u = try { Uri.parse(url ?: return false) } catch (_: Exception) { return false }
+        val host = u.host ?: return false
+        return u.scheme == "https" && (host == "perchance.org" || host.endsWith(".perchance.org"))
+    }
+
+    // ---------- lifecycle ----------
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    override fun onResume() { super.onResume(); webView.onResume() }
+    override fun onPause() { super.onPause(); webView.onPause(); CookieManager.getInstance().flush() }
+
+    override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        capture.cancel()
+        super.onDestroy()
+    }
+
+    companion object {
+        const val START_URL = "https://perchance.org/ai-text-to-image-generator"
+    }
+}
