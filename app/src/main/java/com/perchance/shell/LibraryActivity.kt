@@ -192,7 +192,7 @@ class LibraryActivity : AppCompatActivity() {
             count.visibility = View.GONE; trash.visibility = View.VISIBLE
         } else {
             back.text = "\u2190"
-            title.text = if (open == null) "Private images" else folderTitle(open)
+            title.text = if (open == null) "Gallery" else folderTitle(open)
             count.text = if (open == null) "${folders.sumOf { it.files.size }}" else "${files.size}"
             count.visibility = if (folders.isEmpty()) View.GONE else View.VISIBLE
             trash.visibility = View.GONE

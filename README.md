@@ -7,6 +7,9 @@ A single-site fullscreen Android wrapper for https://perchance.org/ai-text-to-im
   (iframes and resources are not restricted).
 - **No session saving.** Cookies, DOM storage/IndexedDB, cache, history and form data are wiped on every launch and
   when the app is closed. Saved images are not affected.
+- Perchance's own nav (generators, new, edit, login), feedback and the public gallery button are hidden, and links
+  cannot navigate away (`assets/ui.js`, label-based so it may need tweaks if Perchance changes). "private gallery" is
+  renamed to "gallery".
 - A slim tab on the right edge opens a bottom sheet: **Download All** and the private library.
 - Download All reads the generated images from every frame (iframes included) via an injected script
   (`app/src/main/assets/capture.js`) and saves them to app-private storage only. Nothing goes to Gallery or Downloads.
@@ -19,7 +22,7 @@ A single-site fullscreen Android wrapper for https://perchance.org/ai-text-to-im
 
 ## Layout
 `MainActivity` (WebView, sheet) · `CaptureController` (progress, saving) · `ImageStore` (private storage, folders) ·
-`LibraryActivity` (folders/grid/viewer) · `assets/capture.js` (swappable capture strategy)
+`LibraryActivity` (folders/grid/viewer) · `assets/capture.js` (swappable capture strategy) · `assets/ui.js` (page tweaks)
 
 ## Building
 JDK 17, Android SDK 34. `gradle assembleDebug` -> `app/build/outputs/apk/debug/app-debug.apk`.

@@ -2,12 +2,15 @@ package com.perchance.shell
 
 import android.content.Intent
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -154,6 +157,21 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { onClick() }
     }
 
+    private fun downloadButton(onClick: () -> Unit) = TextView(this).apply {
+        text = "\u2193  Download all"; textSize = 17f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        setTextColor(color(R.color.bg))
+        background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF8AB8D8.toInt(), 0xFFB4D4EA.toInt()))
+            .apply { cornerRadius = dp(20).toFloat() }
+        setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.97f).scaleY(0.97f).setDuration(80).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+            }
+            false
+        }
+        setOnClickListener { performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onClick() }
+    }
+
     private fun resetSheet() {
         ui.removeCallbacks(autoHide)
         sheet.removeAllViews()
@@ -183,11 +201,11 @@ class MainActivity : AppCompatActivity() {
         if (capture.isActive) return
         resetSheet()
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(pill("Download All", true) { startDownloadAll() }, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(downloadButton { startDownloadAll() }, LinearLayout.LayoutParams(0, dp(60), 1f))
         val n = store.list().size
-        row.addView(pill(if (n > 0) "\u25A6 $n" else "\u25A6", false) { openLibrary() }.apply {
-            minWidth = dp(56); setPadding(dp(16), 0, dp(16), 0)
-        }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+        row.addView(pill("\u25A6  Gallery" + if (n > 0) "  $n" else "", false) { openLibrary() }.apply {
+            textSize = 15f; minHeight = dp(60); setPadding(dp(18), 0, dp(18), 0)
+        }, LinearLayout.LayoutParams(-2, dp(60)).apply { leftMargin = dp(10) })
         sheet.addView(row)
         reveal(5000)
     }
@@ -360,14 +378,16 @@ class MainActivity : AppCompatActivity() {
      * frames on perchance.org origins. Native only parses {t,id,mime,b64}; no paths or URLs from the page.
      */
     private fun setupBridge() {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
-            !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
         val rules = setOf("https://perchance.org", "https://*.perchance.org")
+        fun asset(n: String) = assets.open(n).bufferedReader().use { it.readText() }
+        // Hides Perchance's own nav/links and renames "private gallery" to "gallery" (all frames).
+        WebViewCompat.addDocumentStartJavaScript(webView, asset("ui.js"), rules)
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         WebViewCompat.addWebMessageListener(webView, "shell", rules) { _, message, _, _, _ ->
             message.data?.let { capture.onMessage(it) }
         }
-        val script = assets.open("capture.js").bufferedReader().use { it.readText() }
-        WebViewCompat.addDocumentStartJavaScript(webView, script, rules)
+        WebViewCompat.addDocumentStartJavaScript(webView, asset("capture.js"), rules)
         bridgeReady = true
     }
 
