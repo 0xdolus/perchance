@@ -4,6 +4,19 @@
   if (window.__pcsUi) return;
   window.__pcsUi = 1;
 
+  // ---- Generator restyle selectors (fill these in from a DOM dump; empty = feature off) ----
+  var SEL = {
+    resultsContainer: '',
+    resultCard: '',
+    resultImage: '',
+    resultActions: '',
+    persona: '',
+    chat: '',
+    shield: '',
+    settings: '',
+    generatingCard: ''
+  };
+
   var HIDE = /^(generators|new|edit|login|log in|sign in|sign up|feedback|view gallery|public gallery|community gallery)$/;
   var BAR = /^(generators|new|edit|login)$/;
   var TITLE = /public gallery|view gallery|community/i;
@@ -65,6 +78,7 @@
       }
     }
     hideBar(bar);
+    collapseGenerating();
   }
 
   // Links cannot take the user away from the current page (downloads are left alone).
@@ -79,12 +93,32 @@
     e.stopPropagation();
   }, true);
 
+  function injectCss() {
+    var hideList = [SEL.resultActions, SEL.persona, SEL.chat, SEL.shield, SEL.settings].filter(Boolean);
+    var t = '[data-pcs-label]::before{content:attr(data-pcs-label);display:block;text-align:center;padding:8px;font-size:14px;opacity:.8}';
+    if (hideList.length) t += hideList.join(',') + '{display:none!important}';
+    if (SEL.resultsContainer) t += SEL.resultsContainer + '{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}';
+    if (SEL.resultImage) t += SEL.resultImage + '{width:100%;aspect-ratio:1;object-fit:cover;border-radius:18px}';
+    var s = document.createElement('style');
+    s.textContent = t;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // Collapse the repeated "Starting..." placeholders into one status.
+  function collapseGenerating() {
+    if (!SEL.generatingCard) return;
+    var g = document.querySelectorAll(SEL.generatingCard);
+    for (var i = 1; i < g.length; i++) hide(g[i]);
+    if (g.length) g[0].setAttribute('data-pcs-label', 'Creating ' + g.length + ' images\u2026');
+  }
+
   var timer = 0;
   function schedule() {
     if (timer) return;
     timer = setTimeout(function () { timer = 0; try { run(); } catch (_) {} }, 150);
   }
   function init() {
+    try { injectCss(); } catch (_) {}
     schedule();
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   }

@@ -1,5 +1,8 @@
 package com.perchance.shell
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -35,6 +38,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewCompat
+import org.json.JSONObject
 import androidx.webkit.WebViewFeature
 
 class MainActivity : AppCompatActivity() {
@@ -51,6 +55,8 @@ class MainActivity : AppCompatActivity() {
     private val autoHide = Runnable { hideSheet() }
     private var loadFailed = false
     private var bridgeReady = false
+    private var devUnlocked = false
+    private val domParts = ArrayList<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,6 +104,11 @@ class MainActivity : AppCompatActivity() {
         // Slim tab on the right edge, a little below centre: nothing on Perchance lives there.
         handleZone = FrameLayout(this).apply {
             setOnClickListener { showBar() }
+            if (DEV_TOOLS) setOnLongClickListener {
+                devUnlocked = true
+                Toast.makeText(context, "Dev tools on", Toast.LENGTH_SHORT).show()
+                showBar(); true
+            }
             addView(View(context).apply {
                 background = rounded(0x55FFFFFF, 2)
             }, FrameLayout.LayoutParams(dp(4), dp(44), Gravity.CENTER_VERTICAL or Gravity.END).apply { rightMargin = dp(4) })
@@ -207,7 +218,36 @@ class MainActivity : AppCompatActivity() {
             textSize = 15f; minHeight = dp(60); setPadding(dp(18), 0, dp(18), 0)
         }, LinearLayout.LayoutParams(-2, dp(60)).apply { leftMargin = dp(10) })
         sheet.addView(row)
-        reveal(5000)
+        if (DEV_TOOLS && devUnlocked) {
+            sheet.addView(pill("Copy DOM outline (dev)", false) { startDomDump() },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+        reveal(if (devUnlocked) 15000 else 5000)
+    }
+
+    // ---------- dev: DOM outline ----------
+
+    private fun startDomDump() {
+        domParts.clear()
+        webView.evaluateJavascript("window.__pcsDump && window.__pcsDump()", null)
+        Toast.makeText(this, "Collecting\u2026", Toast.LENGTH_SHORT).show()
+        ui.postDelayed({
+            val text = domParts.joinToString("\n\n")
+            if (text.isEmpty()) {
+                Toast.makeText(this, "No frames responded", Toast.LENGTH_LONG).show()
+            } else {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("dom", text))
+                Toast.makeText(this, "Copied ${domParts.size} frame(s), ${text.length / 1024} KB", Toast.LENGTH_LONG).show()
+            }
+        }, 3000)
+    }
+
+    private fun onDomPart(raw: String) {
+        try {
+            val j = JSONObject(raw)
+            domParts.add("FRAME: " + j.optString("url") + "\n" + j.optString("text"))
+        } catch (_: Exception) {}
     }
 
     private fun showProgress(done: Int, total: Int, failed: Int, scanning: Boolean) {
@@ -312,7 +352,7 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = false
             allowContentAccess = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            setSupportMultipleWindows(false)
+            setSupportMultipleWindows(true) // no onCreateWindow: popups and target=_blank are dropped
             javaScriptCanOpenWindowsAutomatically = false
         }
         CookieManager.getInstance().apply {
@@ -385,9 +425,12 @@ class MainActivity : AppCompatActivity() {
         WebViewCompat.addDocumentStartJavaScript(webView, asset("ui.js"), rules)
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         WebViewCompat.addWebMessageListener(webView, "shell", rules) { _, message, _, _, _ ->
-            message.data?.let { capture.onMessage(it) }
+            message.data?.let { d ->
+                if (d.startsWith("{\"t\":\"dom\"")) onDomPart(d) else capture.onMessage(d)
+            }
         }
         WebViewCompat.addDocumentStartJavaScript(webView, asset("capture.js"), rules)
+        if (DEV_TOOLS) WebViewCompat.addDocumentStartJavaScript(webView, asset("dom-dump.js"), rules)
         bridgeReady = true
     }
 
@@ -430,6 +473,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** Dev tools (long-press the edge tab). Set to false before shipping. */
+        const val DEV_TOOLS = true
         const val GENERATOR_PATH = "/ai-text-to-image-generator"
         const val START_URL = "https://perchance.org$GENERATOR_PATH"
     }

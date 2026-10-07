@@ -10,6 +10,8 @@ A single-site fullscreen Android wrapper for https://perchance.org/ai-text-to-im
 - Perchance's own nav (generators, new, edit, login), feedback and the public gallery button are hidden, and links
   cannot navigate away (`assets/ui.js`, label-based so it may need tweaks if Perchance changes). "private gallery" is
   renamed to "gallery".
+- Dev tools (`DEV_TOOLS` in MainActivity): long-press the edge tab, then "Copy DOM outline" copies a structural outline
+  of every frame to the clipboard, used to find real selectors for `SEL` in `ui.js`. Set `DEV_TOOLS = false` to ship.
 - A slim tab on the right edge opens a bottom sheet: **Download All** and the private library.
 - Download All reads the generated images from every frame (iframes included) via an injected script
   (`app/src/main/assets/capture.js`) and saves them to app-private storage only. Nothing goes to Gallery or Downloads.
